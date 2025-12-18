@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -20,17 +21,103 @@ class _HomeScreenState extends State<HomeScreen> {
   String connectionStatus = "Disconnected";
   bool isAdvertising = false;
   bool isDiscovering = false;
-  bool isSimulating = false;
   final String userName = "User ${DateTime.now().second}"; // Simple random name
 
   // Game State
   ButtonState _myState = ButtonState.red;
-  bool _peerHasPressed = false;
+  static const Duration _requestDuration = Duration(hours: 24);
+  DateTime? _outgoingRequestExpiresAt;
+  DateTime? _incomingRequestExpiresAt;
+  Timer? _expiryTimer;
 
   @override
   void initState() {
     super.initState();
     _checkPermissions();
+  }
+
+  @override
+  void dispose() {
+    _expiryTimer?.cancel();
+    super.dispose();
+  }
+
+  bool _isValidUntil(DateTime? expiresAt) {
+    if (expiresAt == null) return false;
+    return DateTime.now().isBefore(expiresAt);
+  }
+
+  bool get _hasIncomingRequest => _isValidUntil(_incomingRequestExpiresAt);
+
+  void _clearRequests() {
+    _outgoingRequestExpiresAt = null;
+    _incomingRequestExpiresAt = null;
+  }
+
+  void _scheduleExpiryTimer() {
+    _expiryTimer?.cancel();
+
+    final now = DateTime.now();
+    final candidates = <DateTime?>[
+      _outgoingRequestExpiresAt,
+      _incomingRequestExpiresAt
+    ].whereType<DateTime>().where((t) => t.isAfter(now)).toList();
+
+    if (candidates.isEmpty) return;
+    candidates.sort();
+    final next = candidates.first;
+
+    _expiryTimer = Timer(next.difference(now), () {
+      if (!mounted) return;
+      _handleExpiryIfNeeded();
+    });
+  }
+
+  void _handleExpiryIfNeeded() {
+    final now = DateTime.now();
+
+    if (_myState == ButtonState.orange) {
+      final out = _outgoingRequestExpiresAt;
+      if (out != null && !now.isBefore(out)) {
+        setState(() {
+          _myState = ButtonState.red;
+          _outgoingRequestExpiresAt = null;
+        });
+        _sendControlMessage({"t": "RESET"});
+      }
+    }
+
+    final inc = _incomingRequestExpiresAt;
+    if (inc != null && !now.isBefore(inc) && _myState != ButtonState.green) {
+      setState(() {
+        _incomingRequestExpiresAt = null;
+      });
+    }
+
+    _scheduleExpiryTimer();
+  }
+
+  void _startOutgoingRequest() {
+    final expiresAt = DateTime.now().add(_requestDuration);
+    setState(() {
+      _myState = ButtonState.orange;
+      _outgoingRequestExpiresAt = expiresAt;
+    });
+    _sendControlMessage({
+      "t": "REQUEST",
+      "exp": expiresAt.millisecondsSinceEpoch,
+    });
+    _scheduleExpiryTimer();
+  }
+
+  void _acceptIncomingRequest() {
+    setState(() {
+      _myState = ButtonState.green;
+      _clearRequests();
+    });
+    _expiryTimer?.cancel();
+    _sendControlMessage({"t": "ACCEPT"});
+    _showMatchNotification();
   }
 
   Future<void> _checkPermissions() async {
@@ -52,208 +139,211 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        title: const Text("Light Signal App"),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: connectedEndpointId != null
+            ? IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: _disconnect,
+                tooltip: "Disconnect",
+              )
+            : null,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _resetGame,
-            tooltip: "Reset Game",
-          )
+          if (connectedEndpointId != null)
+            IconButton(
+              icon: Image.asset(
+                "assets/Reset lips.png",
+                width: 32,
+                height: 32,
+              ),
+              onPressed: _resetGame,
+              tooltip: "Reset",
+            )
         ],
       ),
-      body: connectedEndpointId != null
-          ? Center(
-              child: _buildMainButton(),
-            )
-          : Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                children: [
-                  // Status Section
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Column(
-                        children: [
-                          Text("Status: $connectionStatus",
-                              style: const TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 8),
-                          if (connectedEndpointId == null && !isSimulating) ...[
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                              children: [
-                                ElevatedButton(
-                                  onPressed:
-                                      isAdvertising ? null : _startAdvertising,
-                                  child: Text(isAdvertising
-                                      ? "Advertising..."
-                                      : "Host (Advertise)"),
-                                ),
-                                ElevatedButton(
-                                  onPressed:
-                                      isDiscovering ? null : _startDiscovery,
-                                  child: Text(isDiscovering
-                                      ? "Discovering..."
-                                      : "Join (Discover)"),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            OutlinedButton.icon(
-                              onPressed: _toggleSimulation,
-                              icon: const Icon(Icons.bug_report),
-                              label: const Text("Test Mode (Simulate)"),
-                            ),
-                            if (isAdvertising || isDiscovering)
-                              TextButton(
-                                onPressed: _stopAll,
-                                child: const Text("Stop Searching/Advertising"),
-                              )
-                          ] else
-                            ElevatedButton.icon(
-                              onPressed: _disconnect,
-                              icon: const Icon(Icons.close),
-                              label: Text(isSimulating
-                                  ? "Exit Simulation"
-                                  : "Disconnect"),
-                              style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.redAccent,
-                                  foregroundColor: Colors.white),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          Image.asset(
+            "assets/app background.png",
+            fit: BoxFit.cover,
+          ),
+          SafeArea(
+            child: connectedEndpointId != null
+                ? Center(
+                    child: _buildMainButton(),
+                  )
+                : _buildLanding(),
+          ),
+        ],
+      ),
+    );
+  }
 
-                  const Divider(height: 32),
+  Widget _buildLanding() {
+    final bool busy = isAdvertising || isDiscovering;
 
-                  // Control Section
-                  Expanded(
-                    child: connectedEndpointId == null && !isSimulating
-                        ? const Center(
-                            child: Text("Connect to another device to start."))
-                        : Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              if (_myState == ButtonState.green)
-                                const Text("MATCH FOUND!",
-                                    style: TextStyle(
-                                        fontSize: 24,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.green))
-                              else if (_myState == ButtonState.orange)
-                                const Text("Waiting for other device...",
-                                    style: TextStyle(
-                                        fontSize: 18, color: Colors.orange))
-                              else
-                                const Text("Tap the button!",
-                                    style: TextStyle(fontSize: 18)),
-                              const SizedBox(height: 24),
-                              _buildMainButton(),
-                              if (isSimulating) ...[
-                                const Divider(height: 40),
-                                const Text("Debug: Simulate Remote Actions",
-                                    style:
-                                        TextStyle(fontWeight: FontWeight.bold)),
-                                const SizedBox(height: 8),
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceEvenly,
-                                  children: [
-                                    ElevatedButton(
-                                      onPressed: () =>
-                                          _simulateReceive("PRESSED"),
-                                      child: const Text("Simulate 'PRESSED'"),
-                                    ),
-                                    ElevatedButton(
-                                      onPressed: () =>
-                                          _simulateReceive("RESET"),
-                                      child: const Text("Simulate 'RESET'"),
-                                    ),
-                                  ],
-                                )
-                              ]
-                            ],
-                          ),
-                  ),
-                ],
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Image.asset(
+              "assets/new.png",
+              width: 180,
+            ),
+            const SizedBox(height: 28),
+            if (!busy) ...[
+              _landingButton(
+                label: "CREATE ROOM",
+                backgroundColor: const Color(0xFFF2A14A),
+                icon: Icons.add,
+                onPressed: _startAdvertising,
+              ),
+              const SizedBox(height: 16),
+              _landingButton(
+                label: "JOIN ROOM",
+                backgroundColor: const Color(0xFF5CB5F7),
+                icon: Icons.search,
+                onPressed: _startDiscovery,
+              ),
+            ] else ...[
+              Text(
+                connectionStatus,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 16),
+              _landingButton(
+                label: "STOP",
+                backgroundColor: Colors.black54,
+                icon: Icons.stop,
+                onPressed: _stopAll,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _landingButton({
+    required String label,
+    required Color backgroundColor,
+    required IconData icon,
+    required VoidCallback? onPressed,
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      height: 56,
+      child: ElevatedButton(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: backgroundColor,
+          foregroundColor: Colors.white,
+          elevation: 10,
+          shadowColor: Colors.black45,
+          shape: const StadiumBorder(),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: Colors.white),
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1,
               ),
             ),
+          ],
+        ),
+      ),
     );
   }
 
   Widget _buildMainButton() {
-    Color color;
-    String text;
-
+    String assetPath;
     switch (_myState) {
       case ButtonState.red:
-        color = Colors.red;
-        text = "PRESS ME";
+        assetPath = "assets/Red Button.png";
         break;
       case ButtonState.orange:
-        color = Colors.orange;
-        text = "WAITING...";
+        assetPath = "assets/Yellow Button.png";
         break;
       case ButtonState.green:
-        color = Colors.green;
-        text = "MATCHED!";
+        assetPath = "assets/Green Button.png";
         break;
     }
 
     return SizedBox(
-      width: 200,
-      height: 200,
-      child: ElevatedButton(
-        style: ElevatedButton.styleFrom(
-          backgroundColor: color,
-          foregroundColor: Colors.white,
-          shape: const CircleBorder(),
-          elevation: 10,
+      width: 260,
+      height: 260,
+      child: InkWell(
+        onTap: () => _handleButtonClick(),
+        borderRadius: BorderRadius.circular(999),
+        child: Image.asset(
+          assetPath,
+          fit: BoxFit.contain,
         ),
-        onPressed: _handleButtonClick,
-        child: Text(text,
-            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
       ),
     );
   }
 
-  void _handleButtonClick() {
-    if (connectedEndpointId == null && !isSimulating) return;
+  Future<void> _handleButtonClick() async {
+    if (connectedEndpointId == null) return;
 
     if (_myState == ButtonState.red) {
-      // I am pressing the button
-      if (_peerHasPressed) {
-        // The other person already pressed! Match!
-        setState(() {
-          _myState = ButtonState.green;
-        });
-        _sendMessage("PRESSED"); // Tell them I pressed (so they go green)
-        _showMatchNotification();
-      } else {
-        // First to press
-        setState(() {
-          _myState = ButtonState.orange;
-        });
-        _sendMessage("PRESSED"); // Tell them I pressed (so they know)
+      if (_hasIncomingRequest) {
+        _acceptIncomingRequest();
+        return;
       }
-    } else if (_myState == ButtonState.green) {
-      // Already matched, maybe do nothing or reset?
-      // User didn't specify.
-    } else if (_myState == ButtonState.orange) {
-      // Already waiting. Do nothing.
+
+      final bool confirmed = await _confirm24HourRequest();
+      if (!confirmed) return;
+      _startOutgoingRequest();
+      return;
     }
+  }
+
+  Future<bool> _confirm24HourRequest() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Send Love Request"),
+        content: const Text(
+            "This request will stay active for 24 hours. If the other device presses within that time, both devices will show Love Accepted."),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("Start"),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 
   void _resetGame() {
     setState(() {
       _myState = ButtonState.red;
-      _peerHasPressed = false;
+      _clearRequests();
     });
-    _sendMessage("RESET");
+    _expiryTimer?.cancel();
+    _sendControlMessage({"t": "RESET"});
   }
 
   void _showMatchNotification() {
@@ -388,6 +478,9 @@ class _HomeScreenState extends State<HomeScreen> {
       if (status == Status.CONNECTED) {
         connectedEndpointId = id;
         connectionStatus = "Connected";
+        _myState = ButtonState.red;
+        _clearRequests();
+        _expiryTimer?.cancel();
         // Stop advertising/discovery once connected to save battery/logic
         Nearby().stopAdvertising();
         Nearby().stopDiscovery();
@@ -404,8 +497,9 @@ class _HomeScreenState extends State<HomeScreen> {
       connectedEndpointId = null;
       connectionStatus = "Disconnected";
       _myState = ButtonState.red;
-      _peerHasPressed = false;
+      _clearRequests();
     });
+    _expiryTimer?.cancel();
   }
 
   void _stopAll() async {
@@ -419,46 +513,25 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _disconnect() async {
-    if (isSimulating) {
-      setState(() {
-        isSimulating = false;
-        connectionStatus = "Disconnected";
-        _myState = ButtonState.red;
-        _peerHasPressed = false;
-      });
-      return;
-    }
     if (connectedEndpointId != null) {
       await Nearby().disconnectFromEndpoint(connectedEndpointId!);
       setState(() {
         connectedEndpointId = null;
         connectionStatus = "Disconnected";
         _myState = ButtonState.red;
-        _peerHasPressed = false;
+        _clearRequests();
       });
+      _expiryTimer?.cancel();
     }
-  }
-
-  void _toggleSimulation() {
-    setState(() {
-      isSimulating = true;
-      connectionStatus = "Connected (Simulated)";
-    });
   }
 
   // Send & Receive Logic
 
-  void _sendMessage(String message) async {
-    if (isSimulating) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text("Simulated Sending: $message"),
-            backgroundColor: Colors.grey,
-            duration: const Duration(milliseconds: 500)),
-      );
-      return;
-    }
+  void _sendControlMessage(Map<String, Object?> data) {
+    _sendMessage(jsonEncode(data));
+  }
 
+  void _sendMessage(String message) async {
     if (connectedEndpointId == null) return;
 
     try {
@@ -471,35 +544,85 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _simulateReceive(String message) {
-    // Create a fake payload to reuse the logic
-    final payload = Payload(
-        type: PayloadType.BYTES,
-        bytes: Uint8List.fromList(utf8.encode(message)),
-        id: 0);
-    _onPayloadReceived("simulated_id", payload);
-  }
-
   void _onPayloadReceived(String id, Payload payload) {
     if (payload.type == PayloadType.BYTES) {
       String message = utf8.decode(payload.bytes!);
       debugPrint("Received message: $message");
 
-      if (message == "PRESSED") {
-        setState(() {
-          _peerHasPressed = true;
-          if (_myState == ButtonState.orange) {
-            // We were waiting, and they pressed! Match!
-            _myState = ButtonState.green;
-            _showMatchNotification();
+      Map<String, Object?>? data;
+      try {
+        final decoded = jsonDecode(message);
+        if (decoded is Map) {
+          data = decoded.cast<String, Object?>();
+        }
+      } catch (_) {
+        data = null;
+      }
+
+      if (data != null && data["t"] is String) {
+        final type = data["t"] as String;
+
+        if (type == "REQUEST") {
+          final expRaw = data["exp"];
+          final expMillis = expRaw is int
+              ? expRaw
+              : expRaw is num
+                  ? expRaw.toInt()
+                  : null;
+          final expiresAt = expMillis == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(expMillis);
+
+          if (expiresAt != null && DateTime.now().isBefore(expiresAt)) {
+            if (_myState == ButtonState.orange &&
+                _isValidUntil(_outgoingRequestExpiresAt)) {
+              setState(() {
+                _myState = ButtonState.green;
+                _clearRequests();
+              });
+              _expiryTimer?.cancel();
+              _sendControlMessage({"t": "ACCEPT"});
+              _showMatchNotification();
+              return;
+            }
+
+            setState(() {
+              _incomingRequestExpiresAt = expiresAt;
+            });
+            _scheduleExpiryTimer();
           }
-          // If I am Red, I stay Red, but now I know they pressed.
-        });
-      } else if (message == "RESET") {
+          return;
+        }
+
+        if (type == "ACCEPT") {
+          setState(() {
+            _myState = ButtonState.green;
+            _clearRequests();
+          });
+          _expiryTimer?.cancel();
+          _showMatchNotification();
+          return;
+        }
+
+        if (type == "RESET") {
+          setState(() {
+            _myState = ButtonState.red;
+            _clearRequests();
+          });
+          _expiryTimer?.cancel();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Game Reset by peer")),
+          );
+          return;
+        }
+      }
+
+      if (message == "RESET") {
         setState(() {
           _myState = ButtonState.red;
-          _peerHasPressed = false;
+          _clearRequests();
         });
+        _expiryTimer?.cancel();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("Game Reset by peer")),
         );
