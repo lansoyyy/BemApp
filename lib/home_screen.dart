@@ -25,7 +25,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Game State
   ButtonState _myState = ButtonState.red;
-  static const Duration _requestDuration = Duration(hours: 24);
   DateTime? _outgoingRequestExpiresAt;
   DateTime? _incomingRequestExpiresAt;
   Timer? _expiryTimer;
@@ -97,8 +96,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _scheduleExpiryTimer();
   }
 
-  void _startOutgoingRequest() {
-    final expiresAt = DateTime.now().add(_requestDuration);
+  void _startOutgoingRequest(Duration duration) {
+    final expiresAt = DateTime.now().add(duration);
     setState(() {
       _myState = ButtonState.orange;
       _outgoingRequestExpiresAt = expiresAt;
@@ -308,33 +307,82 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
 
-      final bool confirmed = await _confirm24HourRequest();
-      if (!confirmed) return;
-      _startOutgoingRequest();
+      final duration = await _pickRequestDuration();
+      if (duration == null) return;
+      _startOutgoingRequest(duration);
       return;
     }
   }
 
-  Future<bool> _confirm24HourRequest() async {
-    final result = await showDialog<bool>(
+  Future<Duration?> _pickRequestDuration() async {
+    const options = <({String label, Duration duration})>[
+      (label: "30 minutes", duration: Duration(minutes: 30)),
+      (label: "1 hour", duration: Duration(hours: 1)),
+      (label: "6 hours", duration: Duration(hours: 6)),
+      (label: "12 hours", duration: Duration(hours: 12)),
+      (label: "24 hours", duration: Duration(hours: 24)),
+    ];
+
+    return showModalBottomSheet<Duration>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Send Love Request"),
-        content: const Text(
-            "This request will stay active for 24 hours. If the other device presses within that time, both devices will show Love Accepted."),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text("Cancel"),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: false,
+      builder: (context) {
+        return SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 320),
+              child: Material(
+                color: Colors.white.withOpacity(0.22),
+                borderRadius: BorderRadius.circular(24),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 18,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final opt in options) ...[
+                        SizedBox(
+                          width: double.infinity,
+                          height: 46,
+                          child: ElevatedButton(
+                            onPressed: () =>
+                                Navigator.pop(context, opt.duration),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.white.withOpacity(0.85),
+                              foregroundColor: Colors.black87,
+                              elevation: 0,
+                              shape: const StadiumBorder(),
+                            ),
+                            child: Text(
+                              opt.label,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text(
+                          "Cancel",
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text("Start"),
-          ),
-        ],
-      ),
+        );
+      },
     );
-    return result ?? false;
   }
 
   void _resetGame() {
