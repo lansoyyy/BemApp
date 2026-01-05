@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 enum ButtonState { red, orange, green }
 
@@ -15,7 +16,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   final Strategy strategy = Strategy.P2P_STAR;
   String? connectedEndpointId;
   String connectionStatus = "Disconnected";
@@ -29,16 +30,111 @@ class _HomeScreenState extends State<HomeScreen> {
   DateTime? _incomingRequestExpiresAt;
   Timer? _expiryTimer;
 
+  // Connection Health Monitoring
+  Timer? _heartbeatTimer;
+  DateTime? _lastHeartbeatReceived;
+  Timer? _reconnectionTimer;
+  String? _lastConnectedEndpointId;
+  String? _lastConnectedEndpointName;
+  bool _isReconnecting = false;
+  static const Duration _heartbeatInterval = Duration(seconds: 5);
+  static const Duration _connectionTimeout = Duration(seconds: 15);
+
+  // Animation Controllers
+  late AnimationController _buttonScaleController;
+  late AnimationController _buttonFadeController;
+  late AnimationController _statusPulseController;
+  late AnimationController _celebrationController;
+  late Animation<double> _buttonScaleAnimation;
+  late Animation<double> _buttonFadeAnimation;
+  late Animation<double> _statusPulseAnimation;
+  late Animation<double> _celebrationAnimation;
+
+  // Audio Player
+  final AudioPlayer _audioPlayer = AudioPlayer();
+
   @override
   void initState() {
     super.initState();
     _checkPermissions();
+    _initAnimations();
+  }
+
+  void _initAnimations() {
+    // Button scale animation for press effect
+    _buttonScaleController = AnimationController(
+      duration: const Duration(milliseconds: 100),
+      vsync: this,
+    );
+    _buttonScaleAnimation = Tween<double>(begin: 1.0, end: 0.92).animate(
+      CurvedAnimation(parent: _buttonScaleController, curve: Curves.easeInOut),
+    );
+
+    // Button fade animation for state changes
+    _buttonFadeController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+    _buttonFadeAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
+      CurvedAnimation(parent: _buttonFadeController, curve: Curves.easeInOut),
+    );
+
+    // Status pulse animation
+    _statusPulseController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    )..repeat(reverse: true);
+    _statusPulseAnimation = Tween<double>(begin: 0.8, end: 1.0).animate(
+      CurvedAnimation(parent: _statusPulseController, curve: Curves.easeInOut),
+    );
+
+    // Celebration animation
+    _celebrationController = AnimationController(
+      duration: const Duration(milliseconds: 600),
+      vsync: this,
+    );
+    _celebrationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _celebrationController, curve: Curves.elasticOut),
+    );
   }
 
   @override
   void dispose() {
     _expiryTimer?.cancel();
+    _heartbeatTimer?.cancel();
+    _reconnectionTimer?.cancel();
+    _buttonScaleController.dispose();
+    _buttonFadeController.dispose();
+    _statusPulseController.dispose();
+    _celebrationController.dispose();
+    _audioPlayer.dispose();
     super.dispose();
+  }
+
+  // Sound Effects
+
+  Future<void> _playSound(String soundPath) async {
+    try {
+      await _audioPlayer.play(AssetSource(soundPath));
+    } catch (e) {
+      debugPrint("Error playing sound: $e");
+    }
+  }
+
+  void _playButtonClick() {
+    _playSound('sounds/button_click.mp3');
+  }
+
+  void _playMatchSuccess() {
+    _playSound('sounds/match_success.mp3');
+  }
+
+  void _playConnectionSuccess() {
+    _playSound('sounds/connection_success.mp3');
+  }
+
+  void _playReset() {
+    _playSound('sounds/reset.mp3');
   }
 
   bool _isValidUntil(DateTime? expiresAt) {
@@ -51,6 +147,135 @@ class _HomeScreenState extends State<HomeScreen> {
   void _clearRequests() {
     _outgoingRequestExpiresAt = null;
     _incomingRequestExpiresAt = null;
+  }
+
+  // Heartbeat & Connection Health Methods
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+      _sendHeartbeat();
+      _checkConnectionHealth();
+    });
+    _lastHeartbeatReceived = DateTime.now();
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _lastHeartbeatReceived = null;
+  }
+
+  void _sendHeartbeat() {
+    _sendControlMessage(
+        {"t": "PING", "ts": DateTime.now().millisecondsSinceEpoch});
+  }
+
+  void _checkConnectionHealth() {
+    if (_lastHeartbeatReceived == null) return;
+
+    final timeSinceLastHeartbeat =
+        DateTime.now().difference(_lastHeartbeatReceived!);
+    if (timeSinceLastHeartbeat > _connectionTimeout) {
+      debugPrint("Connection timeout detected");
+      _handleConnectionLost();
+    }
+  }
+
+  void _handleConnectionLost() {
+    debugPrint("Connection lost, attempting reconnection...");
+    _stopHeartbeat();
+
+    if (connectedEndpointId != null) {
+      _lastConnectedEndpointId = connectedEndpointId;
+      _lastConnectedEndpointName = userName;
+
+      setState(() {
+        connectedEndpointId = null;
+        connectionStatus = "Reconnecting...";
+      });
+
+      _attemptReconnection();
+    }
+  }
+
+  void _attemptReconnection() {
+    if (_isReconnecting || _lastConnectedEndpointId == null) return;
+
+    setState(() {
+      _isReconnecting = true;
+      connectionStatus = "Attempting to reconnect...";
+    });
+
+    _reconnectionTimer?.cancel();
+    _reconnectionTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      if (connectedEndpointId != null) {
+        timer.cancel();
+        setState(() {
+          _isReconnecting = false;
+        });
+        return;
+      }
+
+      // Try to restart discovery to find the device again
+      _startDiscoveryForReconnection();
+    });
+
+    // Stop trying after 30 seconds
+    Future.delayed(const Duration(seconds: 30), () {
+      if (_isReconnecting) {
+        _reconnectionTimer?.cancel();
+        setState(() {
+          _isReconnecting = false;
+          connectionStatus = "Reconnection failed";
+        });
+        _showReconnectionFailedDialog();
+      }
+    });
+  }
+
+  void _startDiscoveryForReconnection() async {
+    try {
+      await Nearby().startDiscovery(
+        userName,
+        strategy,
+        onEndpointFound: (id, name, serviceId) {
+          // Auto-connect if it's the same device we were connected to
+          if (id == _lastConnectedEndpointId ||
+              name.contains(_lastConnectedEndpointName ?? "")) {
+            _requestConnection(id, name);
+          }
+        },
+        onEndpointLost: (id) {
+          debugPrint("Endpoint lost during reconnection: $id");
+        },
+        serviceId: "com.example.lightsapp",
+      );
+    } catch (e) {
+      debugPrint("Error during reconnection discovery: $e");
+    }
+  }
+
+  void _showReconnectionFailedDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Reconnection Failed"),
+        content: const Text(
+            "Could not reconnect to the device. Please try connecting again."),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              setState(() {
+                connectionStatus = "Disconnected";
+              });
+            },
+            child: const Text("OK"),
+          ),
+        ],
+      ),
+    );
   }
 
   void _scheduleExpiryTimer() {
@@ -98,7 +323,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startOutgoingRequest(Duration duration) {
     final expiresAt = DateTime.now().add(duration);
-    setState(() {
+    _playButtonClick();
+    _animateButtonStateChange(() {
       _myState = ButtonState.orange;
       _outgoingRequestExpiresAt = expiresAt;
     });
@@ -110,13 +336,29 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _acceptIncomingRequest() {
-    setState(() {
+    _playButtonClick();
+    _animateButtonStateChange(() {
       _myState = ButtonState.green;
       _clearRequests();
     });
     _expiryTimer?.cancel();
     _sendControlMessage({"t": "ACCEPT"});
     _showMatchNotification();
+    _playMatchSuccess();
+    _triggerCelebration();
+  }
+
+  void _animateButtonStateChange(VoidCallback onChange) {
+    _buttonFadeController.forward().then((_) {
+      onChange();
+      _buttonFadeController.reverse();
+    });
+  }
+
+  void _triggerCelebration() {
+    _celebrationController.forward().then((_) {
+      _celebrationController.reverse();
+    });
   }
 
   Future<void> _checkPermissions() async {
@@ -210,15 +452,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onPressed: _startDiscovery,
               ),
             ] else ...[
-              Text(
-                connectionStatus,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              _buildConnectionStatus(),
               const SizedBox(height: 16),
               _landingButton(
                 label: "STOP",
@@ -270,6 +504,68 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildConnectionStatus() {
+    Color statusColor;
+    IconData statusIcon;
+    bool shouldPulse = connectionStatus.contains("Reconnecting") ||
+        connectionStatus.contains("Advertising") ||
+        connectionStatus.contains("Discovering");
+
+    if (connectionStatus.contains("Connected")) {
+      statusColor = Colors.green;
+      statusIcon = Icons.wifi;
+    } else if (connectionStatus.contains("Reconnecting")) {
+      statusColor = Colors.orange;
+      statusIcon = Icons.sync;
+    } else if (connectionStatus.contains("Error") ||
+        connectionStatus.contains("Failed")) {
+      statusColor = Colors.red;
+      statusIcon = Icons.error_outline;
+    } else {
+      statusColor = Colors.white;
+      statusIcon = Icons.info_outline;
+    }
+
+    return AnimatedBuilder(
+      animation: _statusPulseController,
+      builder: (context, child) {
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.3),
+            borderRadius: BorderRadius.circular(12),
+            border: shouldPulse
+                ? Border.all(
+                    color: statusColor.withOpacity(_statusPulseAnimation.value),
+                    width: 2,
+                  )
+                : null,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                statusIcon,
+                color: statusColor,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                connectionStatus,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: statusColor,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildMainButton() {
     String assetPath;
     switch (_myState) {
@@ -284,17 +580,41 @@ class _HomeScreenState extends State<HomeScreen> {
         break;
     }
 
-    return SizedBox(
-      width: 260,
-      height: 260,
-      child: InkWell(
-        onTap: () => _handleButtonClick(),
-        borderRadius: BorderRadius.circular(999),
-        child: Image.asset(
-          assetPath,
-          fit: BoxFit.contain,
-        ),
-      ),
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        _buttonScaleController,
+        _buttonFadeController,
+        _celebrationController
+      ]),
+      builder: (context, child) {
+        return Transform.scale(
+          scale: _buttonScaleAnimation.value *
+              (1 + _celebrationAnimation.value * 0.3),
+          child: Opacity(
+            opacity: _buttonFadeAnimation.value,
+            child: SizedBox(
+              width: 260,
+              height: 260,
+              child: GestureDetector(
+                onTapDown: (_) {
+                  _buttonScaleController.forward();
+                },
+                onTapUp: (_) {
+                  _buttonScaleController.reverse();
+                  _handleButtonClick();
+                },
+                onTapCancel: () {
+                  _buttonScaleController.reverse();
+                },
+                child: Image.asset(
+                  assetPath,
+                  fit: BoxFit.contain,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -386,7 +706,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _resetGame() {
-    setState(() {
+    _playReset();
+    _animateButtonStateChange(() {
       _myState = ButtonState.red;
       _clearRequests();
     });
@@ -529,11 +850,20 @@ class _HomeScreenState extends State<HomeScreen> {
         _myState = ButtonState.red;
         _clearRequests();
         _expiryTimer?.cancel();
+        _isReconnecting = false;
+        _reconnectionTimer?.cancel();
+
+        // Start heartbeat for connection health monitoring
+        _startHeartbeat();
+
         // Stop advertising/discovery once connected to save battery/logic
         Nearby().stopAdvertising();
         Nearby().stopDiscovery();
         isAdvertising = false;
         isDiscovering = false;
+
+        // Play connection success sound
+        _playConnectionSuccess();
       } else {
         connectionStatus = "Connection Failed: $status";
       }
@@ -541,6 +871,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onDisconnected(String id) {
+    _stopHeartbeat();
+
     setState(() {
       connectedEndpointId = null;
       connectionStatus = "Disconnected";
@@ -548,9 +880,20 @@ class _HomeScreenState extends State<HomeScreen> {
       _clearRequests();
     });
     _expiryTimer?.cancel();
+
+    // Attempt reconnection if we were previously connected
+    if (_lastConnectedEndpointId != null && !_isReconnecting) {
+      _handleConnectionLost();
+    }
   }
 
   void _stopAll() async {
+    _stopHeartbeat();
+    _reconnectionTimer?.cancel();
+    _isReconnecting = false;
+    _lastConnectedEndpointId = null;
+    _lastConnectedEndpointName = null;
+
     await Nearby().stopAdvertising();
     await Nearby().stopDiscovery();
     setState(() {
@@ -562,6 +905,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _disconnect() async {
     if (connectedEndpointId != null) {
+      _stopHeartbeat();
+      _reconnectionTimer?.cancel();
+      _isReconnecting = false;
+      _lastConnectedEndpointId = null;
+      _lastConnectedEndpointName = null;
+
       await Nearby().disconnectFromEndpoint(connectedEndpointId!);
       setState(() {
         connectedEndpointId = null;
@@ -610,6 +959,19 @@ class _HomeScreenState extends State<HomeScreen> {
       if (data != null && data["t"] is String) {
         final type = data["t"] as String;
 
+        // Handle heartbeat messages
+        if (type == "PING") {
+          _lastHeartbeatReceived = DateTime.now();
+          _sendControlMessage(
+              {"t": "PONG", "ts": DateTime.now().millisecondsSinceEpoch});
+          return;
+        }
+
+        if (type == "PONG") {
+          _lastHeartbeatReceived = DateTime.now();
+          return;
+        }
+
         if (type == "REQUEST") {
           final expRaw = data["exp"];
           final expMillis = expRaw is int
@@ -643,17 +1005,20 @@ class _HomeScreenState extends State<HomeScreen> {
         }
 
         if (type == "ACCEPT") {
-          setState(() {
+          _playMatchSuccess();
+          _animateButtonStateChange(() {
             _myState = ButtonState.green;
             _clearRequests();
           });
           _expiryTimer?.cancel();
           _showMatchNotification();
+          _triggerCelebration();
           return;
         }
 
         if (type == "RESET") {
-          setState(() {
+          _playReset();
+          _animateButtonStateChange(() {
             _myState = ButtonState.red;
             _clearRequests();
           });
@@ -666,7 +1031,8 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       if (message == "RESET") {
-        setState(() {
+        _playReset();
+        _animateButtonStateChange(() {
           _myState = ButtonState.red;
           _clearRequests();
         });
