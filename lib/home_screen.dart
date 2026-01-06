@@ -122,19 +122,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   void _playButtonClick() {
-    _playSound('sounds/button_click.mp3');
+    _playSound('sounds/button_click.wav');
   }
 
   void _playMatchSuccess() {
-    _playSound('sounds/match_success.mp3');
+    _playSound('sounds/match_success.wav');
   }
 
   void _playConnectionSuccess() {
-    _playSound('sounds/connection_success.mp3');
+    _playSound('sounds/connection_success.wav');
   }
 
   void _playReset() {
-    _playSound('sounds/reset.mp3');
+    _playSound('sounds/reset.wav');
   }
 
   bool _isValidUntil(DateTime? expiresAt) {
