@@ -349,9 +349,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   void _animateButtonStateChange(VoidCallback onChange) {
-    _buttonFadeController.forward().then((_) {
-      onChange();
-      _buttonFadeController.reverse();
+    _buttonFadeController.forward(from: 0.0).then((_) {
+      if (!mounted) return;
+      setState(() {
+        onChange();
+      });
+      if (!mounted) return;
+      _buttonFadeController.reverse(from: 1.0);
     });
   }
 
