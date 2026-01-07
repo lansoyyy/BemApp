@@ -30,15 +30,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   DateTime? _incomingRequestExpiresAt;
   Timer? _expiryTimer;
 
-  // Connection Health Monitoring
+  // Connection Health Monitoring (Disabled for stability)
   Timer? _heartbeatTimer;
   DateTime? _lastHeartbeatReceived;
-  Timer? _reconnectionTimer;
-  String? _lastConnectedEndpointId;
-  String? _lastConnectedEndpointName;
-  bool _isReconnecting = false;
-  static const Duration _heartbeatInterval = Duration(seconds: 5);
-  static const Duration _connectionTimeout = Duration(seconds: 15);
+  static const Duration _heartbeatInterval = Duration(seconds: 30);
+  static const Duration _connectionTimeout = Duration(seconds: 120);
 
   // Animation Controllers
   late AnimationController _buttonScaleController;
@@ -102,7 +98,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   void dispose() {
     _expiryTimer?.cancel();
     _heartbeatTimer?.cancel();
-    _reconnectionTimer?.cancel();
     _buttonScaleController.dispose();
     _buttonFadeController.dispose();
     _statusPulseController.dispose();
@@ -172,110 +167,17 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   void _checkConnectionHealth() {
+    // Disabled aggressive timeout checking for stable connections
+    // Only log warnings, don't disconnect
     if (_lastHeartbeatReceived == null) return;
 
     final timeSinceLastHeartbeat =
         DateTime.now().difference(_lastHeartbeatReceived!);
     if (timeSinceLastHeartbeat > _connectionTimeout) {
-      debugPrint("Connection timeout detected");
-      _handleConnectionLost();
+      debugPrint(
+          "Warning: No heartbeat received for ${timeSinceLastHeartbeat.inMinutes} minutes");
+      // Don't automatically disconnect - let nearby_connections handle it naturally
     }
-  }
-
-  void _handleConnectionLost() {
-    debugPrint("Connection lost, attempting reconnection...");
-    _stopHeartbeat();
-
-    if (connectedEndpointId != null) {
-      _lastConnectedEndpointId = connectedEndpointId;
-      _lastConnectedEndpointName = userName;
-
-      setState(() {
-        connectedEndpointId = null;
-        connectionStatus = "Reconnecting...";
-      });
-
-      _attemptReconnection();
-    }
-  }
-
-  void _attemptReconnection() {
-    if (_isReconnecting || _lastConnectedEndpointId == null) return;
-
-    setState(() {
-      _isReconnecting = true;
-      connectionStatus = "Attempting to reconnect...";
-    });
-
-    _reconnectionTimer?.cancel();
-    _reconnectionTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
-      if (connectedEndpointId != null) {
-        timer.cancel();
-        setState(() {
-          _isReconnecting = false;
-        });
-        return;
-      }
-
-      // Try to restart discovery to find the device again
-      _startDiscoveryForReconnection();
-    });
-
-    // Stop trying after 30 seconds
-    Future.delayed(const Duration(seconds: 30), () {
-      if (_isReconnecting) {
-        _reconnectionTimer?.cancel();
-        setState(() {
-          _isReconnecting = false;
-          connectionStatus = "Reconnection failed";
-        });
-        _showReconnectionFailedDialog();
-      }
-    });
-  }
-
-  void _startDiscoveryForReconnection() async {
-    try {
-      await Nearby().startDiscovery(
-        userName,
-        strategy,
-        onEndpointFound: (id, name, serviceId) {
-          // Auto-connect if it's the same device we were connected to
-          if (id == _lastConnectedEndpointId ||
-              name.contains(_lastConnectedEndpointName ?? "")) {
-            _requestConnection(id, name);
-          }
-        },
-        onEndpointLost: (id) {
-          debugPrint("Endpoint lost during reconnection: $id");
-        },
-        serviceId: "com.example.lightsapp",
-      );
-    } catch (e) {
-      debugPrint("Error during reconnection discovery: $e");
-    }
-  }
-
-  void _showReconnectionFailedDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Reconnection Failed"),
-        content: const Text(
-            "Could not reconnect to the device. Please try connecting again."),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              setState(() {
-                connectionStatus = "Disconnected";
-              });
-            },
-            child: const Text("OK"),
-          ),
-        ],
-      ),
-    );
   }
 
   void _scheduleExpiryTimer() {
@@ -854,10 +756,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         _myState = ButtonState.red;
         _clearRequests();
         _expiryTimer?.cancel();
-        _isReconnecting = false;
-        _reconnectionTimer?.cancel();
 
-        // Start heartbeat for connection health monitoring
+        // Start heartbeat for connection health monitoring (non-intrusive)
         _startHeartbeat();
 
         // Stop advertising/discovery once connected to save battery/logic
@@ -884,19 +784,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       _clearRequests();
     });
     _expiryTimer?.cancel();
-
-    // Attempt reconnection if we were previously connected
-    if (_lastConnectedEndpointId != null && !_isReconnecting) {
-      _handleConnectionLost();
-    }
   }
 
   void _stopAll() async {
     _stopHeartbeat();
-    _reconnectionTimer?.cancel();
-    _isReconnecting = false;
-    _lastConnectedEndpointId = null;
-    _lastConnectedEndpointName = null;
 
     await Nearby().stopAdvertising();
     await Nearby().stopDiscovery();
@@ -910,10 +801,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   void _disconnect() async {
     if (connectedEndpointId != null) {
       _stopHeartbeat();
-      _reconnectionTimer?.cancel();
-      _isReconnecting = false;
-      _lastConnectedEndpointId = null;
-      _lastConnectedEndpointName = null;
 
       await Nearby().disconnectFromEndpoint(connectedEndpointId!);
       setState(() {
